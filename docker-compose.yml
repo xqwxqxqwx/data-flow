@@ -73,6 +73,17 @@ services:
       timeout: 10s
       retries: 20
 
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
   # ---------- Databases ----------
   postgres-airflow:
     image: postgres:16
@@ -144,6 +155,37 @@ services:
       - ./spark:/opt/spark-apps
     depends_on:
       - spark-master
+
+  jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    depends_on:
+      spark-master:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8889:8888"
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-dataflow}
+      SPARK_MASTER: spark://spark-master:7077
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio12345}
+      PYSPARK_SUBMIT_ARGS: >
+        --master spark://spark-master:7077
+        --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262,org.postgresql:postgresql:42.7.4
+        --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+        --conf spark.sql.catalog.local=org.apache.iceberg.spark.SparkCatalog
+        --conf spark.sql.catalog.local.type=hadoop
+        --conf spark.sql.catalog.local.warehouse=s3a://warehouse/iceberg
+        --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
+        --conf spark.hadoop.fs.s3a.path.style.access=true
+        --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false
+        --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+        --conf spark.hadoop.fs.s3a.access.key=${MINIO_ROOT_USER:-minio}
+        --conf spark.hadoop.fs.s3a.secret.key=${MINIO_ROOT_PASSWORD:-minio12345}
+        pyspark-shell
+    volumes:
+      - ./notebooks:/home/jovyan/work
 
   # ---------- Airflow ----------
   airflow:

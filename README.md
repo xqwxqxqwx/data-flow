@@ -39,6 +39,9 @@ docker compose up -d --build
   Логин/пароль: `minio` / `minio12345` (или из `.env`)
 - **Spark Master UI**: `http://localhost:8080`
 - **Spark Worker UI**: `http://localhost:8081`
+- **Kafka UI**: `http://localhost:8085`
+- **Jupyter (PySpark)**: `http://localhost:8889`  
+  Токен: `dataflow` (или `JUPYTER_TOKEN` из `.env`)
 - **ClickHouse HTTP**: `http://localhost:8123/ping`  
   Логин/пароль: `analytics` / `analytics`
 - **Kafka Bootstrap**:
@@ -56,6 +59,8 @@ docker compose up -d --build
 - **MinIO**: `9000` (S3), `9001` (console)
 - **Kafka**: `9092`
 - **Kafka (host listener)**: `29092`
+- **Kafka UI**: `8085`
+- **Jupyter**: `8889`
 - **ClickHouse**: `8123` (HTTP)
 - **Postgres Airflow**: `5433`
 - **Postgres Source**: `5434`
