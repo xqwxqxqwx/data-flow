@@ -8,6 +8,9 @@ CREATE TABLE IF NOT EXISTS raw.orders (
   currency      TEXT NOT NULL
 );
 
+-- Required for Debezium CDC (logical replication)
+ALTER ROLE source WITH REPLICATION;
+
 INSERT INTO raw.orders (order_id, user_id, order_ts, amount, currency) VALUES
   (1, 101, NOW() - INTERVAL '3 days',  12.50, 'USD'),
   (2, 101, NOW() - INTERVAL '2 days',  39.90, 'USD'),

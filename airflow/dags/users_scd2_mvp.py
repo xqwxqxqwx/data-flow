@@ -17,7 +17,7 @@ def _env(name: str, default: str | None = None) -> str:
 
 
 with DAG(
-    dag_id="kafka_stream_mvp",
+    dag_id="users_scd2_mvp",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
@@ -25,24 +25,25 @@ with DAG(
         "owner": "data-flow",
         "on_failure_callback": airflow_telegram_failure_alert,
     },
-    tags=["kafka", "mvp"],
+    tags=["kafka", "dbt", "scd2", "mvp"],
 ) as dag:
-    produce_events = BashOperator(
-        task_id="produce_kafka_events",
+    produce_updates = BashOperator(
+        task_id="produce_user_updates",
         bash_command=(
-            "python /opt/airflow/dags/kafka/produce_orders_events.py "
-            "--topic orders_events "
-            "--count 30"
+            "python /opt/airflow/dags/kafka/produce_user_updates.py "
+            "--topic user_updates "
+            "--count 60 "
+            "--users 12"
         ),
         env={"KAFKA_BOOTSTRAP": _env("KAFKA_BOOTSTRAP", "kafka:9092")},
     )
 
-    consume_to_clickhouse = BashOperator(
-        task_id="consume_kafka_to_clickhouse",
+    consume_updates = BashOperator(
+        task_id="consume_user_updates_to_clickhouse",
         bash_command=(
-            "python /opt/airflow/dags/kafka/consume_orders_to_clickhouse.py "
-            "--topic orders_events "
-            "--expected-count 30 "
+            "python /opt/airflow/dags/kafka/consume_user_updates_to_clickhouse.py "
+            "--topic user_updates "
+            "--expected-count 60 "
             "--timeout-sec 30"
         ),
         env={
@@ -56,10 +57,10 @@ with DAG(
     )
 
     dbt_run = BashOperator(
-        task_id="dbt_run_kafka_models",
+        task_id="dbt_run_users_scd2",
         bash_command=(
             "cd /opt/dbt && "
-            "/opt/dbt_venv/bin/dbt run --profiles-dir /opt/dbt --select kafka_orders_daily"
+            "/opt/dbt_venv/bin/dbt run --profiles-dir /opt/dbt --select +dim_users_scd2"
         ),
         env={
             "DBT_CLICKHOUSE_HOST": _env("CLICKHOUSE_HOST", "clickhouse"),
@@ -71,10 +72,10 @@ with DAG(
     )
 
     dbt_test = BashOperator(
-        task_id="dbt_test_kafka_models",
+        task_id="dbt_test_users_scd2",
         bash_command=(
             "cd /opt/dbt && "
-            "/opt/dbt_venv/bin/dbt test --profiles-dir /opt/dbt --select kafka_orders_daily"
+            "/opt/dbt_venv/bin/dbt test --profiles-dir /opt/dbt --select dim_users_scd2"
         ),
         env={
             "DBT_CLICKHOUSE_HOST": _env("CLICKHOUSE_HOST", "clickhouse"),
@@ -85,4 +86,5 @@ with DAG(
         },
     )
 
-    produce_events >> consume_to_clickhouse >> dbt_run >> dbt_test
+    produce_updates >> consume_updates >> dbt_run >> dbt_test
+

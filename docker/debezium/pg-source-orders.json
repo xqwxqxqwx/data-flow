@@ -1,0 +1,17 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "database.hostname": "postgres-source",
+  "database.port": "5432",
+  "database.user": "source",
+  "database.password": "source",
+  "database.dbname": "source",
+  "topic.prefix": "source",
+  "schema.include.list": "raw",
+  "table.include.list": "raw.orders",
+  "plugin.name": "pgoutput",
+  "publication.autocreate.mode": "filtered",
+  "slot.name": "debezium_orders_slot",
+  "snapshot.mode": "initial",
+  "tombstones.on.delete": "false"
+}
+

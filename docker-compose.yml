@@ -103,6 +103,14 @@ services:
 
   postgres-source:
     image: postgres:16
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
     environment:
       POSTGRES_USER: source
       POSTGRES_PASSWORD: source
@@ -117,6 +125,42 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  debezium:
+    image: quay.io/debezium/connect:3.0
+    profiles: ["cdc"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres-source:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: "debezium-connect"
+      CONFIG_STORAGE_TOPIC: "connect_configs"
+      OFFSET_STORAGE_TOPIC: "connect_offsets"
+      STATUS_STORAGE_TOPIC: "connect_status"
+
+  debezium-init:
+    image: curlimages/curl:8.12.1
+    profiles: ["cdc"]
+    depends_on:
+      debezium:
+        condition: service_started
+    volumes:
+      - ./docker/debezium:/config:ro
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - |
+        set -e
+        until curl -sf http://debezium:8083/; do sleep 2; done
+        curl -sS -X PUT -H 'Content-Type: application/json' \
+          http://debezium:8083/connectors/pg-source-orders/config \
+          --data @/config/pg-source-orders.json >/dev/null
+        echo "Debezium connector configured."
 
   # ---------- Spark + Iceberg ----------
   spark-master:
@@ -189,8 +233,7 @@ services:
 
   # ---------- Airflow ----------
   airflow:
-    build:
-      context: ./docker/airflow
+    image: data-flow-airflow:latest
     depends_on:
       postgres-airflow:
         condition: service_healthy
@@ -233,6 +276,10 @@ services:
       CLICKHOUSE_PASSWORD: analytics
 
       KAFKA_BOOTSTRAP: kafka:9092
+
+      # Optional: Telegram alerting for DAG failures
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     ports:
       - "8088:8080"
     volumes:

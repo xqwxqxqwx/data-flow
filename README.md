@@ -25,6 +25,12 @@ copy .env.example .env
 docker compose up -d --build
 ```
 
+CDC-сервисы Debezium вынесены в отдельный профиль. Если сеть до контейнерного реестра доступна, их можно поднять отдельно:
+
+```bash
+docker compose --profile cdc up -d debezium debezium-init
+```
+
 Открой Airflow UI:
 - `http://localhost:8088` (логин/пароль: `admin` / `admin`)
 

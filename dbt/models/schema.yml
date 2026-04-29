@@ -1,0 +1,87 @@
+version: 2
+
+models:
+  - name: raw_orders
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+      - name: user_id
+        tests:
+          - not_null
+      - name: order_ts
+        tests:
+          - not_null
+      - name: amount
+        tests:
+          - not_null
+      - name: currency
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["USD", "EUR", "RUB"]
+
+  - name: orders_daily
+    columns:
+      - name: order_date
+        tests:
+          - not_null
+          - unique
+
+  - name: kafka_orders_daily
+    columns:
+      - name: order_date
+        tests:
+          - not_null
+          - unique
+
+  - name: cdc_orders_current
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+      - name: last_ts_ms
+        tests:
+          - not_null
+
+  - name: raw_orders_inc
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+      - name: order_ts
+        tests:
+          - not_null
+
+  - name: orders_daily_inc
+    columns:
+      - name: order_date
+        tests:
+          - not_null
+          - unique
+
+  - name: raw_user_updates
+    columns:
+      - name: update_id
+        tests:
+          - not_null
+          - unique
+      - name: user_id
+        tests:
+          - not_null
+      - name: updated_at
+        tests:
+          - not_null
+
+  - name: dim_users_scd2
+    columns:
+      - name: user_id
+        tests:
+          - not_null
+      - name: valid_from
+        tests:
+          - not_null
+
