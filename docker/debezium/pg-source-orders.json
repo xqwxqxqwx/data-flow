@@ -12,6 +12,7 @@
   "publication.autocreate.mode": "filtered",
   "slot.name": "debezium_orders_slot",
   "snapshot.mode": "initial",
+  "decimal.handling.mode": "double",
   "tombstones.on.delete": "false"
 }
 

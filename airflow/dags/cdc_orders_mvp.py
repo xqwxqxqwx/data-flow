@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from datetime import datetime
 
 import psycopg2
 from airflow import DAG
-from airflow.exceptions import AirflowSkipException
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
 
@@ -44,19 +44,23 @@ def mutate_postgres_orders() -> None:
 
 
 def require_debezium_connect() -> None:
-    """
-    CDC in this repo is optional (compose profile `cdc`).
-    If Debezium Connect isn't running, skip downstream tasks instead of failing the DAG.
-    """
     host = os.getenv("DEBEZIUM_HOST", "debezium")
     port = int(os.getenv("DEBEZIUM_PORT", "8083"))
-    try:
-        with socket.create_connection((host, port), timeout=2):
-            return
-    except OSError as e:
-        raise AirflowSkipException(
-            f"Debezium Connect not reachable at {host}:{port} (compose --profile cdc). {e}"
-        )
+    timeout_sec = int(os.getenv("DEBEZIUM_WAIT_TIMEOUT_SEC", "90"))
+    deadline = time.time() + timeout_sec
+    last_error: OSError | None = None
+
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return
+        except OSError as e:
+            last_error = e
+            time.sleep(2)
+
+    raise RuntimeError(
+        f"Debezium Connect not reachable at {host}:{port} after {timeout_sec}s: {last_error}"
+    )
 
 
 with DAG(

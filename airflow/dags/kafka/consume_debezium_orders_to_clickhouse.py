@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import time
@@ -27,7 +28,39 @@ def _parse_ts_ms(ts_ms: int | None) -> datetime:
 def _to_decimal(v: object | None) -> Decimal | None:
     if v is None:
         return None
+    if isinstance(v, dict):
+        # Kafka Connect JSON decimal payload can arrive as {"scale": 2, "value": "base64..."}
+        scale = int(v.get("scale", 0))
+        encoded = v.get("value")
+        if isinstance(encoded, str) and encoded:
+            raw = base64.b64decode(encoded)
+            unscaled = int.from_bytes(raw, byteorder="big", signed=True)
+            return Decimal(unscaled) / (Decimal(10) ** scale)
+    if isinstance(v, str):
+        try:
+            return Decimal(v)
+        except Exception:
+            # Debezium can emit Decimal as base64-encoded bytes for JSON converter.
+            raw = base64.b64decode(v)
+            unscaled = int.from_bytes(raw, byteorder="big", signed=True)
+            return Decimal(unscaled) / Decimal(100)
     return Decimal(str(v))
+
+
+def _parse_order_ts(raw: object | None) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if isinstance(raw, (int, float)):
+        value = int(raw)
+        # Debezium can emit epoch in microseconds/milliseconds/seconds depending on column mode.
+        if value > 10_000_000_000_000:
+            return datetime.fromtimestamp(value / 1_000_000.0, tz=timezone.utc)
+        if value > 10_000_000_000:
+            return datetime.fromtimestamp(value / 1_000.0, tz=timezone.utc)
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    return None
 
 
 def main() -> None:
@@ -90,10 +123,7 @@ def main() -> None:
             order_id = int(record["order_id"])
             user_id = int(record["user_id"]) if record.get("user_id") is not None else None
 
-            order_ts_raw = record.get("order_ts")
-            order_ts = None
-            if isinstance(order_ts_raw, str) and order_ts_raw:
-                order_ts = datetime.fromisoformat(order_ts_raw.replace("Z", "+00:00"))
+            order_ts = _parse_order_ts(record.get("order_ts"))
 
             amount = _to_decimal(record.get("amount"))
             currency = record.get("currency")
@@ -116,8 +146,7 @@ def main() -> None:
     consumer.close()
 
     if not rows:
-        # Debezium is optional in this repo; allow empty consumption for convenience.
-        return
+        raise RuntimeError("No CDC messages consumed from Debezium topic.")
     client.insert(
         "cdc_orders_events",
         rows,

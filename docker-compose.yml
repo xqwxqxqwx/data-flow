@@ -84,6 +84,35 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
 
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "9308:9308"
+    command:
+      - --kafka.server=kafka:9092
+      - --web.listen-address=:9308
+      - --log.level=info
+
+  clickhouse-exporter:
+    image: f1yegor/clickhouse-exporter:latest
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "9116:9116"
+    environment:
+      CLICKHOUSE_URL: http://analytics:analytics@clickhouse:8123/
+      TELEMETRY: "false"
+
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.27.2
+    ports:
+      - "9102:9102"
+      - "9125:9125/udp"
+
   # ---------- Databases ----------
   postgres-airflow:
     image: postgres:16
@@ -128,7 +157,6 @@ services:
 
   debezium:
     image: quay.io/debezium/connect:3.0
-    profiles: ["cdc"]
     depends_on:
       kafka:
         condition: service_healthy
@@ -142,13 +170,17 @@ services:
       CONFIG_STORAGE_TOPIC: "connect_configs"
       OFFSET_STORAGE_TOPIC: "connect_offsets"
       STATUS_STORAGE_TOPIC: "connect_status"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/ >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   debezium-init:
     image: curlimages/curl:8.12.1
-    profiles: ["cdc"]
     depends_on:
       debezium:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./docker/debezium:/config:ro
     entrypoint:
@@ -245,6 +277,8 @@ services:
         condition: service_healthy
       postgres-source:
         condition: service_healthy
+      debezium-init:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
     environment:
@@ -254,6 +288,10 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
       AIRFLOW__WEBSERVER__SECRET_KEY: "dev-secret-key"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__METRICS__STATSD_ON: "true"
+      AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+      AIRFLOW__METRICS__STATSD_PORT: "9125"
+      AIRFLOW__METRICS__STATSD_PREFIX: airflow
       _PIP_ADDITIONAL_REQUIREMENTS: ""
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077"
 
@@ -301,9 +339,34 @@ services:
       airflow scheduler & airflow webserver
       "
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    depends_on:
+      - statsd-exporter
+      - kafka-exporter
+      - clickhouse-exporter
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+
 volumes:
   minio_data:
   clickhouse_data:
   kafka_data:
   pg_airflow_data:
   pg_source_data:
+  grafana_data:

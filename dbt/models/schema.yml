@@ -85,3 +85,40 @@ models:
         tests:
           - not_null
 
+  - name: bronze_orders_stream
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+      - name: user_id
+        tests:
+          - not_null
+      - name: order_ts
+        tests:
+          - not_null
+      - name: currency
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["USD", "EUR", "RUB"]
+
+  - name: silver_orders_stream
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+          - unique
+      - name: amount
+        tests:
+          - not_null
+
+  - name: gold_orders_daily
+    columns:
+      - name: order_date
+        tests:
+          - not_null
+          - unique
+      - name: orders_cnt
+        tests:
+          - not_null
+
