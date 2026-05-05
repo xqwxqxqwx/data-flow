@@ -41,11 +41,30 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  clickhouse-init:
+    image: curlimages/curl:8.12.1
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./docker/clickhouse/init:/init:ro
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - |
+        until curl -sf "http://clickhouse:8123/ping" >/dev/null; do sleep 2; done
+        for f in /init/*.sql; do
+          [ -f "$$f" ] || continue
+          curl -sS "http://clickhouse:8123/?multiquery=1" --data-binary "@$$f" >/dev/null
+        done
+        echo "ClickHouse init SQL executed."
 
   kafka:
     image: apache/kafka:3.7.0
@@ -223,14 +242,122 @@ services:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.worker.Worker
       - spark://spark-master:7077
+      - --cores
+      - "3"
+      - --memory
+      - "2g"
       - --webui-port
       - "8081"
     ports:
       - "8081:8081"
+    cpus: 2.0
+    mem_limit: 3g
     volumes:
       - ./spark:/opt/spark-apps
     depends_on:
       - spark-master
+
+  spark-worker-2:
+    build:
+      context: ./docker/spark
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --cores
+      - "2"
+      - --memory
+      - "2g"
+      - --webui-port
+      - "8082"
+    ports:
+      - "8082:8082"
+    cpus: 1.5
+    mem_limit: 2g
+    volumes:
+      - ./spark:/opt/spark-apps
+    depends_on:
+      - spark-master
+
+  # ---------- Flink Streaming ----------
+  flink-jobmanager:
+    build:
+      context: ./docker/flink
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        /docker-entrypoint.sh jobmanager &
+        JM_PID=$$!
+        echo "Waiting for JobManager REST to become available..."
+        until /opt/flink/bin/flink list -r >/dev/null 2>&1; do
+          sleep 2
+        done
+        echo "Submitting streaming SQL job..."
+        /opt/flink/bin/sql-client.sh -f /opt/flink/sql/orders_streaming_all.sql
+        wait $$JM_PID
+    volumes:
+      - ./docker/flink/sql:/opt/flink/sql:ro
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+        rest.bind-address: 0.0.0.0
+    ports:
+      - "8087:8081"
+      - "6123:6123"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse-init:
+        condition: service_completed_successfully
+
+  flink-taskmanager:
+    build:
+      context: ./docker/flink
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 3
+    depends_on:
+      - flink-jobmanager
+
+  flink-sql-runner:
+    build:
+      context: ./docker/flink
+    profiles: ["flink-manual"]
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      clickhouse-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./docker/flink/sql:/opt/flink/sql:ro
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        cat /opt/flink/sql/orders_streaming_all.sql | tr -d '\r' | /opt/flink/bin/sql-client.sh \
+          -Dexecution.target=remote \
+          -Dexecution.remote.host=flink-jobmanager \
+          -Dexecution.remote.port=8081
+
+  kafka-orders-producer:
+    image: data-flow-airflow:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_STREAM_TOPIC: orders_events_stream
+      PRODUCER_INTERVAL_SEC: "0.5"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+    command: >
+      bash -lc "python /opt/airflow/dags/kafka/produce_orders_events_stream.py"
 
   jupyter:
     image: jupyter/pyspark-notebook:spark-3.5.0
@@ -241,6 +368,9 @@ services:
         condition: service_completed_successfully
     ports:
       - "8889:8888"
+      - "4040:4040"
+      - "7078:7078"
+      - "7079:7079"
     environment:
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:-dataflow}
       SPARK_MASTER: spark://spark-master:7077
@@ -271,10 +401,18 @@ services:
         condition: service_healthy
       spark-master:
         condition: service_started
+      spark-worker:
+        condition: service_started
+      spark-worker-2:
+        condition: service_started
       clickhouse:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
       postgres-source:
         condition: service_healthy
       debezium-init:

@@ -7,6 +7,7 @@ import clickhouse_connect
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
+from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 
 from telegram_alert import airflow_telegram_failure_alert
 
@@ -98,16 +99,16 @@ with DAG(
         },
     )
 
-    spark_bronze_to_silver = BashOperator(
+    spark_bronze_to_silver = SparkSubmitOperator(
         task_id="spark_bronze_to_iceberg_silver",
-        bash_command=(
-            "/opt/spark/bin/spark-submit "
-            "--master spark://spark-master:7077 "
-            "/opt/spark-apps/jobs/bronze_orders_to_iceberg_silver.py"
-        ),
-        env={
-            "PATH": _env("PATH"),
-            "JAVA_HOME": _env("JAVA_HOME", "/usr/lib/jvm/java-17-openjdk-amd64"),
+        application="/opt/spark-apps/jobs/bronze_orders_to_iceberg_silver.py",
+        conn_id="spark_default",
+        conf={
+            "spark.executor.cores": "2",
+            "spark.cores.max": "3",
+            "spark.sql.shuffle.partitions": "6",
+        },
+        env_vars={
             "MINIO_RAW_BUCKET": _env("MINIO_RAW_BUCKET", "raw"),
             "BRONZE_INPUT_PREFIX": "bronze/orders_prod",
             "TARGET_ICEBERG_TABLE": "local.silver.orders_stream",

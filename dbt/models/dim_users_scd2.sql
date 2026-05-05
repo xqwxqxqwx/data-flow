@@ -19,4 +19,3 @@ select
   valid_to,
   valid_to is null as is_current
 from base
-

@@ -69,6 +69,19 @@ docker compose exec airflow bash -lc "cd /opt/dbt && /opt/dbt_venv/bin/dbt test 
 
 Если панель пустая, сначала проверь `Prometheus targets`, потом запусти любой DAG и подожди 1-2 минуты.
 
+## Distributed Spark + Flink streaming
+
+Теперь в проекте:
+- **Spark distributed**: `spark-master` + `spark-worker` (3 cores) + `spark-worker-2` (2 cores)
+- **Flink streaming**: `flink-jobmanager` + `flink-taskmanager` + `flink-sql-runner`
+- **Always-on producer**: сервис `kafka-orders-producer` постоянно пишет в Kafka topic `orders_events_stream`
+- **Streaming flow без Airflow-consumer**:
+  - `orders_events_stream` -> Flink SQL enrichment -> `orders_events_enriched`
+  - ClickHouse Kafka Engine + Materialized View читают `orders_events_enriched` автоматически в `analytics.orders_events_enriched`
+
+Flink UI:
+- `http://localhost:8087`
+
 ## Запуск
 
 ```bash
@@ -86,6 +99,7 @@ Debezium CDC поднимается автоматически вместе со
 2. `data_flow_mvp`
 3. `cdc_orders_mvp`
 4. `prod_like_e2e_pipeline`
+5. Проверить always-on streaming (`Flink + ClickHouse`) без запуска DAG
 
 ## Интерфейсы
 
@@ -93,6 +107,7 @@ Debezium CDC поднимается автоматически вместе со
 - Grafana: `http://localhost:3000`
 - Prometheus: `http://localhost:9090`
 - Kafka UI: `http://localhost:8085`
+- Flink UI: `http://localhost:8087`
 - Spark Master UI: `http://localhost:8080`
 - Spark Worker UI: `http://localhost:8081`
 - MinIO Console: `http://localhost:9001`
