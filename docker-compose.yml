@@ -359,6 +359,25 @@ services:
     command: >
       bash -lc "python /opt/airflow/dags/kafka/produce_orders_events_stream.py"
 
+  # Live Relic Route shop writing into postgres-source (opt-in: docker compose --profile sim up -d)
+  relic-simulator:
+    image: data-flow-airflow:latest
+    profiles: ["sim"]
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+    environment:
+      SOURCE_PG_HOST: postgres-source
+      SOURCE_PG_PORT: "5432"
+      SOURCE_PG_DB: source
+      SOURCE_PG_USER: source
+      SOURCE_PG_PASSWORD: source
+      SIM_TICK_SEC: "5"
+    volumes:
+      - ./scripts:/opt/scripts:ro
+    command: >
+      bash -lc "python /opt/scripts/simulate_relic_live.py"
+
   jupyter:
     image: jupyter/pyspark-notebook:spark-3.5.0
     depends_on:

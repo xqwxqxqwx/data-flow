@@ -101,6 +101,27 @@ Debezium CDC поднимается автоматически вместе со
 4. `prod_like_e2e_pipeline`
 5. Проверить always-on streaming (`Flink + ClickHouse`) без запуска DAG
 
+## Relic Route (домен)
+
+Онлайн-магазин архивных, готических и винтажных вещей: заказ с доставкой или покупка в фургончике,
+который каждый вечер стоит в новом месте Москвы. OLTP — схема `relic` в `postgres-source`
+(`customers`, `items`, `vans`, `stop_locations`, `van_stops`, `orders`, `order_items`, `deliveries`).
+Все `TIMESTAMP` хранятся в UTC, бизнес-даты (`van_stops.stop_date`) — по Москве.
+
+```bash
+# обновить уже созданный volume до текущей схемы (идемпотентно)
+docker compose exec -T postgres-source psql -U source -d source -v ON_ERROR_STOP=1 < docker/postgres-source/migrations/001_phase1_deliveries.sql
+
+# история за ~45 дней (mvp) или ~120 дней (large) от текущей даты
+python scripts/generate_relic_seed.py --scale mvp --apply
+
+# «живой» магазин: заказы, оплаты, доставки, фургоны, поступления
+docker compose --profile sim up -d relic-simulator
+docker compose logs -f relic-simulator
+```
+
+Batch в DWH: DAG `relic_route_batch` (Postgres → ClickHouse bronze → dbt `models/relic` → dbt tests).
+
 ## Интерфейсы
 
 - Airflow: `http://localhost:8088`
