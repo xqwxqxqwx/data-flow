@@ -26,6 +26,7 @@ services:
         until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do sleep 2; done
         mc mb -p local/warehouse || true
         mc mb -p local/raw || true
+        mc mb -p local/flink || true
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
@@ -48,8 +49,9 @@ services:
       timeout: 5s
       retries: 20
 
+  # re-applies init/*.sql on every start (all DDL is IF NOT EXISTS); fails loudly on errors
   clickhouse-init:
-    image: curlimages/curl:8.12.1
+    image: clickhouse/clickhouse-server:25.3
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -57,12 +59,13 @@ services:
       - ./docker/clickhouse/init:/init:ro
     entrypoint:
       - /bin/sh
-      - -lc
+      - -c
       - |
-        until curl -sf "http://clickhouse:8123/ping" >/dev/null; do sleep 2; done
+        set -e
         for f in /init/*.sql; do
           [ -f "$$f" ] || continue
-          curl -sS "http://clickhouse:8123/?multiquery=1" --data-binary "@$$f" >/dev/null
+          echo "applying $$f"
+          clickhouse-client --host clickhouse --user analytics --password analytics --multiquery < "$$f"
         done
         echo "ClickHouse init SQL executed."
 
@@ -102,6 +105,9 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://debezium:8083
 
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.7.0
@@ -174,12 +180,35 @@ services:
       timeout: 5s
       retries: 20
 
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8086:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      # new schema versions must stay readable by existing consumers
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
   debezium:
-    image: quay.io/debezium/connect:3.0
+    build:
+      context: ./docker/debezium
+    image: data-flow-debezium:latest
     depends_on:
       kafka:
         condition: service_healthy
       postgres-source:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy
     ports:
       - "8083:8083"
@@ -201,17 +230,20 @@ services:
       debezium:
         condition: service_healthy
     volumes:
-      - ./docker/debezium:/config:ro
+      - ./docker/debezium/connectors:/config:ro
+    # one connector per file: connectors/<name>.json -> PUT /connectors/<name>/config
     entrypoint:
       - /bin/sh
       - -lc
       - |
         set -e
         until curl -sf http://debezium:8083/; do sleep 2; done
-        curl -sS -X PUT -H 'Content-Type: application/json' \
-          http://debezium:8083/connectors/pg-source-orders/config \
-          --data @/config/pg-source-orders.json >/dev/null
-        echo "Debezium connector configured."
+        for f in /config/*.json; do
+          name=$$(basename "$$f" .json)
+          curl -sSf -X PUT -H 'Content-Type: application/json' \
+            "http://debezium:8083/connectors/$$name/config" --data @"$$f" >/dev/null
+          echo "Debezium connector $$name configured."
+        done
 
   # ---------- Spark + Iceberg ----------
   spark-master:
@@ -295,6 +327,8 @@ services:
         done
         echo "Submitting streaming SQL job..."
         /opt/flink/bin/sql-client.sh -f /opt/flink/sql/orders_streaming_all.sql
+        echo "Submitting Relic Route real-time job..."
+        /opt/flink/bin/sql-client.sh -f /opt/flink/sql/relic_realtime.sql
         wait $$JM_PID
     volumes:
       - ./docker/flink/sql:/opt/flink/sql:ro
@@ -303,12 +337,24 @@ services:
         jobmanager.rpc.address: flink-jobmanager
         rest.address: flink-jobmanager
         rest.bind-address: 0.0.0.0
+        state.checkpoints.dir: s3://flink/checkpoints
+        execution.checkpointing.interval: 30s
+        s3.endpoint: http://minio:9000
+        s3.path.style.access: true
+        s3.access-key: ${MINIO_ROOT_USER:-minio}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD:-minio12345}
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     ports:
       - "8087:8081"
       - "6123:6123"
     depends_on:
       kafka:
         condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       clickhouse-init:
         condition: service_completed_successfully
 
@@ -320,6 +366,14 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 3
+        state.checkpoints.dir: s3://flink/checkpoints
+        execution.checkpointing.interval: 30s
+        s3.endpoint: http://minio:9000
+        s3.path.style.access: true
+        s3.access-key: ${MINIO_ROOT_USER:-minio}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD:-minio12345}
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     depends_on:
       - flink-jobmanager
 
