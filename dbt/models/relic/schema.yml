@@ -1,0 +1,76 @@
+version: 2
+
+models:
+  - name: stg_relic_orders
+    description: Staging Relic Route orders from Postgres bronze.
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: customer_id
+        tests: [not_null]
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ['online', 'van']
+      - name: total_amount
+        tests: [not_null]
+
+  - name: stg_relic_order_items
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_relic_orders')
+              field: order_id
+      - name: item_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_relic_items')
+              field: item_id
+
+  - name: stg_relic_deliveries
+    description: Home deliveries for online orders.
+    columns:
+      - name: delivery_id
+        tests: [unique, not_null]
+      - name: order_id
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('stg_relic_orders')
+              field: order_id
+      - name: method
+        tests:
+          - accepted_values:
+              values: ['courier', 'post', 'pickup_point']
+      - name: status
+        tests:
+          - accepted_values:
+              values: ['pending', 'shipped', 'delivered', 'returned', 'cancelled']
+
+  - name: stg_relic_items
+    columns:
+      - name: item_id
+        tests: [unique, not_null]
+
+  - name: mart_relic_orders_by_channel_daily
+    description: Daily GMV online vs van.
+    columns:
+      - name: order_date
+        tests: [not_null]
+      - name: channel
+        tests: [not_null]
+
+  - name: mart_relic_van_stop_revenue
+    description: GMV attributed to each van stop.
+
+  - name: mart_relic_deliveries_daily
+    description: Delivery performance per day, method and city.
+    columns:
+      - name: delivery_date
+        tests: [not_null]
+      - name: method
+        tests: [not_null]

@@ -6,6 +6,8 @@ from datetime import datetime
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
+from telegram_alert import airflow_telegram_failure_alert
+
 
 def _env(name: str, default: str | None = None) -> str:
     v = os.getenv(name, default)
@@ -19,7 +21,10 @@ with DAG(
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
-    default_args={"owner": "data-flow"},
+    default_args={
+        "owner": "data-flow",
+        "on_failure_callback": airflow_telegram_failure_alert,
+    },
     tags=["kafka", "mvp"],
 ) as dag:
     produce_events = BashOperator(
@@ -65,4 +70,19 @@ with DAG(
         },
     )
 
-    produce_events >> consume_to_clickhouse >> dbt_run
+    dbt_test = BashOperator(
+        task_id="dbt_test_kafka_models",
+        bash_command=(
+            "cd /opt/dbt && "
+            "/opt/dbt_venv/bin/dbt test --profiles-dir /opt/dbt --select kafka_orders_daily"
+        ),
+        env={
+            "DBT_CLICKHOUSE_HOST": _env("CLICKHOUSE_HOST", "clickhouse"),
+            "DBT_CLICKHOUSE_PORT": _env("CLICKHOUSE_PORT", "8123"),
+            "DBT_CLICKHOUSE_DB": _env("CLICKHOUSE_DB", "analytics"),
+            "DBT_CLICKHOUSE_USER": _env("CLICKHOUSE_USER", "analytics"),
+            "DBT_CLICKHOUSE_PASSWORD": _env("CLICKHOUSE_PASSWORD", "analytics"),
+        },
+    )
+
+    produce_events >> consume_to_clickhouse >> dbt_run >> dbt_test

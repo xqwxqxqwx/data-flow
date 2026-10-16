@@ -1,4 +1,4 @@
-FROM apache/spark:3.5.1 as spark_runtime
+FROM apache/spark:3.5.0 as spark_runtime
 
 FROM apache/airflow:2.10.4-python3.11
 

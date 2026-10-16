@@ -1,66 +1,136 @@
 # data-flow
 
-Пет‑проект по data engineering в Docker: **Airflow + Spark + Kafka + S3(MinIO) + Iceberg + Postgres + ClickHouse + dbt**.
+Пет-проект по data engineering в Docker: **Airflow + Kafka + Spark + MinIO(S3) + Iceberg + ClickHouse + dbt + Prometheus + Grafana**.
 
-## Что уже работает (MVP)
+## Архитектура слоев (layered architecture)
 
-- **Источник**: `postgres-source` с демо-таблицей `raw.orders`
-- **Lakehouse**: Spark пишет таблицу **Iceberg** в MinIO (`s3a://warehouse/iceberg/...`)
-- **DWH**: данные грузятся в ClickHouse в таблицу `analytics.raw_orders`
-- **dbt**: строит витрину `analytics.orders_daily`
-- **Оркестрация**: DAG `data_flow_mvp` в Airflow
-- **Kafka-поток**: DAG `kafka_stream_mvp` (producer -> consumer -> ClickHouse -> dbt)
+- **Bronze**
+  - сырые события из Kafka сохраняются в MinIO (`raw/bronze/...`)
+  - сырые данные в ClickHouse: `analytics.bronze_orders_stream`
+- **Silver**
+  - Spark чистит и дедуплицирует поток в Iceberg: `local.silver.orders_stream`
+  - dbt-модель: `silver_orders_stream`
+- **Gold**
+  - витрина в dbt: `gold_orders_daily`
+  - готова для BI/дашбордов
+
+## End-to-end DAG (prod-like)
+
+Новый DAG: `prod_like_e2e_pipeline`
+
+Пайплайн:
+1. Producer публикует события в Kafka (`orders_events_prod`)
+2. Consumer сохраняет raw JSONL в MinIO (bronze)
+3. Spark job `bronze_orders_to_iceberg_silver.py` строит silver-таблицу в Iceberg
+4. Данные попадают в ClickHouse (`bronze_orders_stream`)
+5. dbt запускает layered-модели: bronze -> silver -> gold
+6. dbt tests валидируют качество данных
+
+## dbt tests
+
+В проекте есть:
+- generic tests (`not_null`, `unique`, `accepted_values`)
+- singular test: `dbt/tests/silver_orders_amount_non_negative.sql`
+
+Ручной запуск внутри контейнера `airflow`:
+
+```bash
+docker compose exec airflow bash -lc "cd /opt/dbt && /opt/dbt_venv/bin/dbt run --profiles-dir /opt/dbt"
+docker compose exec airflow bash -lc "cd /opt/dbt && /opt/dbt_venv/bin/dbt test --profiles-dir /opt/dbt"
+```
+
+## Observability: Prometheus + Grafana
+
+Добавлены сервисы:
+- `prometheus` (`http://localhost:9090`)
+- `grafana` (`http://localhost:3000`, `admin/admin`)
+- `statsd-exporter` (Airflow metrics -> Prometheus)
+- `kafka-exporter`
+- `clickhouse-exporter`
+
+### Куда смотреть в Prometheus
+
+- `http://localhost:9090/targets`  
+  Проверяй, что все targets в `UP`.
+- Примеры полезных запросов:
+  - `airflow_scheduler_heartbeat`
+  - `sum(rate(airflow_ti_failures[5m]))`
+  - `topk(5, kafka_consumergroup_lag)`
+  - `clickhouse_up`
+
+### Куда смотреть в Grafana
+
+- Открой `Dashboards -> Data Flow -> Data Flow Overview`
+- Базовые панели:
+  - Airflow scheduler heartbeat
+  - Kafka consumer lag
+  - ClickHouse availability
+  - Airflow task failures rate
+
+Если панель пустая, сначала проверь `Prometheus targets`, потом запусти любой DAG и подожди 1-2 минуты.
+
+## Distributed Spark + Flink streaming
+
+Теперь в проекте:
+- **Spark distributed**: `spark-master` + `spark-worker` (3 cores) + `spark-worker-2` (2 cores)
+- **Flink streaming**: `flink-jobmanager` + `flink-taskmanager` + `flink-sql-runner`
+- **Always-on producer**: сервис `kafka-orders-producer` постоянно пишет в Kafka topic `orders_events_stream`
+- **Streaming flow без Airflow-consumer**:
+  - `orders_events_stream` -> Flink SQL enrichment -> `orders_events_enriched`
+  - ClickHouse Kafka Engine + Materialized View читают `orders_events_enriched` автоматически в `analytics.orders_events_enriched`
+
+Flink UI:
+- `http://localhost:8087`
 
 ## Запуск
 
-Скопируй переменные окружения (по желанию):
-
 ```bash
 copy .env.example .env
-```
-
-Подними стек:
-
-```bash
 docker compose up -d --build
 ```
 
+Debezium CDC поднимается автоматически вместе со всем стеком (`debezium` + `debezium-init`).
+
 Открой Airflow UI:
-- `http://localhost:8088` (логин/пароль: `admin` / `admin`)
+- `http://localhost:8088` (`admin/admin`)
 
-Запусти DAG `data_flow_mvp` вручную из UI.
-Для Kafka-части запусти DAG `kafka_stream_mvp`.
+Рекомендуемый порядок для проверки:
+1. `kafka_stream_mvp`
+2. `data_flow_mvp`
+3. `cdc_orders_mvp`
+4. `prod_like_e2e_pipeline`
+5. Проверить always-on streaming (`Flink + ClickHouse`) без запуска DAG
 
-## Доступы и интерфейсы
+## Relic Route (домен)
 
-- **Airflow UI**: `http://localhost:8088`  
-  Логин/пароль: `admin` / `admin`
-- **MinIO Console**: `http://localhost:9001`  
-  Логин/пароль: `minio` / `minio12345` (или из `.env`)
-- **Spark Master UI**: `http://localhost:8080`
-- **Spark Worker UI**: `http://localhost:8081`
-- **Kafka UI**: `http://localhost:8085`
-- **Jupyter (PySpark)**: `http://localhost:8889`  
-  Токен: `dataflow` (или `JUPYTER_TOKEN` из `.env`)
-- **ClickHouse HTTP**: `http://localhost:8123/ping`  
-  Логин/пароль: `analytics` / `analytics`
-- **Kafka Bootstrap**:
-  - из контейнеров: `kafka:9092`
-  - с хоста: `localhost:29092`
-- **Postgres (source)**: `localhost:5434`  
-  БД/логин/пароль: `source` / `source` / `source`
-- **Postgres (airflow metadata)**: `localhost:5433`  
-  БД/логин/пароль: `airflow` / `airflow` / `airflow`
+Онлайн-магазин архивных, готических и винтажных вещей: заказ с доставкой или покупка в фургончике,
+который каждый вечер стоит в новом месте Москвы. OLTP — схема `relic` в `postgres-source`
+(`customers`, `items`, `vans`, `stop_locations`, `van_stops`, `orders`, `order_items`, `deliveries`).
+Все `TIMESTAMP` хранятся в UTC, бизнес-даты (`van_stops.stop_date`) — по Москве.
 
-## Полезные порты
+```bash
+# обновить уже созданный volume до текущей схемы (идемпотентно)
+docker compose exec -T postgres-source psql -U source -d source -v ON_ERROR_STOP=1 < docker/postgres-source/migrations/001_phase1_deliveries.sql
 
-- **Airflow**: `8088`
-- **Spark UI (master)**: `8080`
-- **MinIO**: `9000` (S3), `9001` (console)
-- **Kafka**: `9092`
-- **Kafka (host listener)**: `29092`
-- **Kafka UI**: `8085`
-- **Jupyter**: `8889`
-- **ClickHouse**: `8123` (HTTP)
-- **Postgres Airflow**: `5433`
-- **Postgres Source**: `5434`
+# история за ~45 дней (mvp) или ~120 дней (large) от текущей даты
+python scripts/generate_relic_seed.py --scale mvp --apply
+
+# «живой» магазин: заказы, оплаты, доставки, фургоны, поступления
+docker compose --profile sim up -d relic-simulator
+docker compose logs -f relic-simulator
+```
+
+Batch в DWH: DAG `relic_route_batch` (Postgres → ClickHouse bronze → dbt `models/relic` → dbt tests).
+
+## Интерфейсы
+
+- Airflow: `http://localhost:8088`
+- Grafana: `http://localhost:3000`
+- Prometheus: `http://localhost:9090`
+- Kafka UI: `http://localhost:8085`
+- Flink UI: `http://localhost:8087`
+- Spark Master UI: `http://localhost:8080`
+- Spark Worker UI: `http://localhost:8081`
+- MinIO Console: `http://localhost:9001`
+- Jupyter: `http://localhost:8889`
+- ClickHouse ping: `http://localhost:8123/ping`

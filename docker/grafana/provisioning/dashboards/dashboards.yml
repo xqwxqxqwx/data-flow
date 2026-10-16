@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: data-flow
+    orgId: 1
+    folder: Data Flow
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

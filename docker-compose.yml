@@ -41,11 +41,30 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  clickhouse-init:
+    image: curlimages/curl:8.12.1
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./docker/clickhouse/init:/init:ro
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - |
+        until curl -sf "http://clickhouse:8123/ping" >/dev/null; do sleep 2; done
+        for f in /init/*.sql; do
+          [ -f "$$f" ] || continue
+          curl -sS "http://clickhouse:8123/?multiquery=1" --data-binary "@$$f" >/dev/null
+        done
+        echo "ClickHouse init SQL executed."
 
   kafka:
     image: apache/kafka:3.7.0
@@ -84,6 +103,35 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
 
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "9308:9308"
+    command:
+      - --kafka.server=kafka:9092
+      - --web.listen-address=:9308
+      - --log.level=info
+
+  clickhouse-exporter:
+    image: f1yegor/clickhouse-exporter:latest
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "9116:9116"
+    environment:
+      CLICKHOUSE_URL: http://analytics:analytics@clickhouse:8123/
+      TELEMETRY: "false"
+
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.27.2
+    ports:
+      - "9102:9102"
+      - "9125:9125/udp"
+
   # ---------- Databases ----------
   postgres-airflow:
     image: postgres:16
@@ -103,6 +151,14 @@ services:
 
   postgres-source:
     image: postgres:16
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
     environment:
       POSTGRES_USER: source
       POSTGRES_PASSWORD: source
@@ -117,6 +173,45 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  debezium:
+    image: quay.io/debezium/connect:3.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres-source:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: "debezium-connect"
+      CONFIG_STORAGE_TOPIC: "connect_configs"
+      OFFSET_STORAGE_TOPIC: "connect_offsets"
+      STATUS_STORAGE_TOPIC: "connect_status"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/ >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  debezium-init:
+    image: curlimages/curl:8.12.1
+    depends_on:
+      debezium:
+        condition: service_healthy
+    volumes:
+      - ./docker/debezium:/config:ro
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - |
+        set -e
+        until curl -sf http://debezium:8083/; do sleep 2; done
+        curl -sS -X PUT -H 'Content-Type: application/json' \
+          http://debezium:8083/connectors/pg-source-orders/config \
+          --data @/config/pg-source-orders.json >/dev/null
+        echo "Debezium connector configured."
 
   # ---------- Spark + Iceberg ----------
   spark-master:
@@ -147,14 +242,141 @@ services:
       - /opt/spark/bin/spark-class
       - org.apache.spark.deploy.worker.Worker
       - spark://spark-master:7077
+      - --cores
+      - "3"
+      - --memory
+      - "2g"
       - --webui-port
       - "8081"
     ports:
       - "8081:8081"
+    cpus: 2.0
+    mem_limit: 3g
     volumes:
       - ./spark:/opt/spark-apps
     depends_on:
       - spark-master
+
+  spark-worker-2:
+    build:
+      context: ./docker/spark
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --cores
+      - "2"
+      - --memory
+      - "2g"
+      - --webui-port
+      - "8082"
+    ports:
+      - "8082:8082"
+    cpus: 1.5
+    mem_limit: 2g
+    volumes:
+      - ./spark:/opt/spark-apps
+    depends_on:
+      - spark-master
+
+  # ---------- Flink Streaming ----------
+  flink-jobmanager:
+    build:
+      context: ./docker/flink
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        /docker-entrypoint.sh jobmanager &
+        JM_PID=$$!
+        echo "Waiting for JobManager REST to become available..."
+        until /opt/flink/bin/flink list -r >/dev/null 2>&1; do
+          sleep 2
+        done
+        echo "Submitting streaming SQL job..."
+        /opt/flink/bin/sql-client.sh -f /opt/flink/sql/orders_streaming_all.sql
+        wait $$JM_PID
+    volumes:
+      - ./docker/flink/sql:/opt/flink/sql:ro
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+        rest.bind-address: 0.0.0.0
+    ports:
+      - "8087:8081"
+      - "6123:6123"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse-init:
+        condition: service_completed_successfully
+
+  flink-taskmanager:
+    build:
+      context: ./docker/flink
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 3
+    depends_on:
+      - flink-jobmanager
+
+  flink-sql-runner:
+    build:
+      context: ./docker/flink
+    profiles: ["flink-manual"]
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      clickhouse-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./docker/flink/sql:/opt/flink/sql:ro
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        cat /opt/flink/sql/orders_streaming_all.sql | tr -d '\r' | /opt/flink/bin/sql-client.sh \
+          -Dexecution.target=remote \
+          -Dexecution.remote.host=flink-jobmanager \
+          -Dexecution.remote.port=8081
+
+  kafka-orders-producer:
+    image: data-flow-airflow:latest
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_STREAM_TOPIC: orders_events_stream
+      PRODUCER_INTERVAL_SEC: "0.5"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+    command: >
+      bash -lc "python /opt/airflow/dags/kafka/produce_orders_events_stream.py"
+
+  # Live Relic Route shop writing into postgres-source (opt-in: docker compose --profile sim up -d)
+  relic-simulator:
+    image: data-flow-airflow:latest
+    profiles: ["sim"]
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+    environment:
+      SOURCE_PG_HOST: postgres-source
+      SOURCE_PG_PORT: "5432"
+      SOURCE_PG_DB: source
+      SOURCE_PG_USER: source
+      SOURCE_PG_PASSWORD: source
+      SIM_TICK_SEC: "5"
+    volumes:
+      - ./scripts:/opt/scripts:ro
+    command: >
+      bash -lc "python /opt/scripts/simulate_relic_live.py"
 
   jupyter:
     image: jupyter/pyspark-notebook:spark-3.5.0
@@ -165,6 +387,9 @@ services:
         condition: service_completed_successfully
     ports:
       - "8889:8888"
+      - "4040:4040"
+      - "7078:7078"
+      - "7079:7079"
     environment:
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:-dataflow}
       SPARK_MASTER: spark://spark-master:7077
@@ -189,19 +414,28 @@ services:
 
   # ---------- Airflow ----------
   airflow:
-    build:
-      context: ./docker/airflow
+    image: data-flow-airflow:latest
     depends_on:
       postgres-airflow:
         condition: service_healthy
       spark-master:
         condition: service_started
+      spark-worker:
+        condition: service_started
+      spark-worker-2:
+        condition: service_started
       clickhouse:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
       postgres-source:
         condition: service_healthy
+      debezium-init:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
     environment:
@@ -211,6 +445,10 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
       AIRFLOW__WEBSERVER__SECRET_KEY: "dev-secret-key"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      AIRFLOW__METRICS__STATSD_ON: "true"
+      AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+      AIRFLOW__METRICS__STATSD_PORT: "9125"
+      AIRFLOW__METRICS__STATSD_PREFIX: airflow
       _PIP_ADDITIONAL_REQUIREMENTS: ""
       AIRFLOW_CONN_SPARK_DEFAULT: "spark://spark-master:7077"
 
@@ -233,6 +471,10 @@ services:
       CLICKHOUSE_PASSWORD: analytics
 
       KAFKA_BOOTSTRAP: kafka:9092
+
+      # Optional: Telegram alerting for DAG failures
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     ports:
       - "8088:8080"
     volumes:
@@ -254,9 +496,34 @@ services:
       airflow scheduler & airflow webserver
       "
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    depends_on:
+      - statsd-exporter
+      - kafka-exporter
+      - clickhouse-exporter
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+
 volumes:
   minio_data:
   clickhouse_data:
   kafka_data:
   pg_airflow_data:
   pg_source_data:
+  grafana_data:
