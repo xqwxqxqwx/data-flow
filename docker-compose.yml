@@ -26,6 +26,7 @@ services:
         until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do sleep 2; done
         mc mb -p local/warehouse || true
         mc mb -p local/raw || true
+        mc mb -p local/flink || true
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio12345}
@@ -48,8 +49,9 @@ services:
       timeout: 5s
       retries: 20
 
+  # re-applies init/*.sql on every start (all DDL is IF NOT EXISTS); fails loudly on errors
   clickhouse-init:
-    image: curlimages/curl:8.12.1
+    image: clickhouse/clickhouse-server:25.3
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -57,12 +59,13 @@ services:
       - ./docker/clickhouse/init:/init:ro
     entrypoint:
       - /bin/sh
-      - -lc
+      - -c
       - |
-        until curl -sf "http://clickhouse:8123/ping" >/dev/null; do sleep 2; done
+        set -e
         for f in /init/*.sql; do
           [ -f "$$f" ] || continue
-          curl -sS "http://clickhouse:8123/?multiquery=1" --data-binary "@$$f" >/dev/null
+          echo "applying $$f"
+          clickhouse-client --host clickhouse --user analytics --password analytics --multiquery < "$$f"
         done
         echo "ClickHouse init SQL executed."
 
@@ -324,6 +327,8 @@ services:
         done
         echo "Submitting streaming SQL job..."
         /opt/flink/bin/sql-client.sh -f /opt/flink/sql/orders_streaming_all.sql
+        echo "Submitting Relic Route real-time job..."
+        /opt/flink/bin/sql-client.sh -f /opt/flink/sql/relic_realtime.sql
         wait $$JM_PID
     volumes:
       - ./docker/flink/sql:/opt/flink/sql:ro
@@ -332,12 +337,24 @@ services:
         jobmanager.rpc.address: flink-jobmanager
         rest.address: flink-jobmanager
         rest.bind-address: 0.0.0.0
+        state.checkpoints.dir: s3://flink/checkpoints
+        execution.checkpointing.interval: 30s
+        s3.endpoint: http://minio:9000
+        s3.path.style.access: true
+        s3.access-key: ${MINIO_ROOT_USER:-minio}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD:-minio12345}
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     ports:
       - "8087:8081"
       - "6123:6123"
     depends_on:
       kafka:
         condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       clickhouse-init:
         condition: service_completed_successfully
 
@@ -349,6 +366,14 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 3
+        state.checkpoints.dir: s3://flink/checkpoints
+        execution.checkpointing.interval: 30s
+        s3.endpoint: http://minio:9000
+        s3.path.style.access: true
+        s3.access-key: ${MINIO_ROOT_USER:-minio}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD:-minio12345}
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     depends_on:
       - flink-jobmanager
 

@@ -138,6 +138,23 @@ docker compose exec schema-registry kafka-avro-console-consumer --bootstrap-serv
   --property schema.registry.url=http://localhost:8081 --topic cdc.relic.orders --from-beginning --max-messages 5
 ```
 
+### Real-time слой (Flink → Kafka → ClickHouse)
+
+```
+cdc.relic.* (Avro) ─► Flink job relic-realtime ─► rt.relic.* (upsert, Avro) ─► ClickHouse Kafka engine + MV ─► ReplacingMergeTree
+```
+
+- Flink SQL: `docker/flink/sql/relic_realtime.sql`, отправляется автоматически при старте `flink-jobmanager`.
+  Checkpoints — `s3://flink/checkpoints` (MinIO), метрики — Prometheus (`job="flink"`).
+- Результаты считаются только из CDC-данных (без processing time), поэтому перечитывание топиков с начала
+  всегда даёт то же состояние. CDC-топики `cdc.relic.*` хранятся бессрочно (`retention.ms=-1`).
+- ClickHouse (`docker/clickhouse/init/002_relic_realtime.sql`), читать через представления:
+  - `analytics.v_relic_live_inventory` — живой статус каждой вещи;
+  - `analytics.v_relic_live_inventory_by_category` — в продаже / в резерве / продано и стоимость витрины по категориям;
+  - `analytics.v_relic_live_van_today` — фургоны сегодня: где стоят, открыты ли, выручка и последняя продажа.
+- Перегенерация данных (`generate_relic_seed.py`) делает TRUNCATE, а Debezium его не передаёт: после неё
+  real-time слой надо пересобрать (удалить топики `cdc.relic.*`/`rt.relic.*`, пересоздать коннектор и Flink).
+
 ## Интерфейсы
 
 - Airflow: `http://localhost:8088`
