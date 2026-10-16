@@ -122,12 +122,30 @@ docker compose logs -f relic-simulator
 
 Batch в DWH: DAG `relic_route_batch` (Postgres → ClickHouse bronze → dbt `models/relic` → dbt tests).
 
+### CDC с контрактами (Debezium + Schema Registry + Avro)
+
+- Коннекторы лежат в `docker/debezium/connectors/<name>.json`; `debezium-init` регистрирует каждый файл как `/connectors/<name>`.
+- `relic-cdc`: все таблицы `relic.*` → топики `cdc.relic.<table>` в **Avro**, схемы в Schema Registry
+  (`http://localhost:8086`, subjects `cdc.relic.<table>-key|-value`, совместимость `BACKWARD`).
+  Деньги — Avro `decimal(12,2)`, в событиях UPDATE есть `before` (`REPLICA IDENTITY FULL`).
+- `pg-source-orders` (legacy): только `raw.orders` → `source.raw.orders` в JSON для `cdc_orders_mvp`.
+- Образ Debezium собирается из `docker/debezium/Dockerfile` (добавляет Confluent AvroConverter).
+
+```bash
+docker compose exec -T postgres-source psql -U source -d source -v ON_ERROR_STOP=1 < docker/postgres-source/migrations/002_phase2_replica_identity.sql
+curl localhost:8083/connectors?expand=status
+docker compose exec schema-registry kafka-avro-console-consumer --bootstrap-server kafka:9092 \
+  --property schema.registry.url=http://localhost:8081 --topic cdc.relic.orders --from-beginning --max-messages 5
+```
+
 ## Интерфейсы
 
 - Airflow: `http://localhost:8088`
 - Grafana: `http://localhost:3000`
 - Prometheus: `http://localhost:9090`
 - Kafka UI: `http://localhost:8085`
+- Schema Registry: `http://localhost:8086/subjects`
+- Kafka Connect (Debezium): `http://localhost:8083/connectors`
 - Flink UI: `http://localhost:8087`
 - Spark Master UI: `http://localhost:8080`
 - Spark Worker UI: `http://localhost:8081`

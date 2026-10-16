@@ -126,3 +126,13 @@ CREATE INDEX IF NOT EXISTS idx_relic_orders_channel ON relic.orders (channel);
 CREATE INDEX IF NOT EXISTS idx_relic_van_stops_date ON relic.van_stops (stop_date);
 CREATE INDEX IF NOT EXISTS idx_relic_order_items_item ON relic.order_items (item_id);
 CREATE INDEX IF NOT EXISTS idx_relic_deliveries_status ON relic.deliveries (status);
+
+-- CDC (Debezium relic-cdc): full row images so UPDATE events carry `before`.
+ALTER TABLE relic.customers      REPLICA IDENTITY FULL;
+ALTER TABLE relic.items          REPLICA IDENTITY FULL;
+ALTER TABLE relic.vans           REPLICA IDENTITY FULL;
+ALTER TABLE relic.stop_locations REPLICA IDENTITY FULL;
+ALTER TABLE relic.van_stops      REPLICA IDENTITY FULL;
+ALTER TABLE relic.orders         REPLICA IDENTITY FULL;
+ALTER TABLE relic.order_items    REPLICA IDENTITY FULL;
+ALTER TABLE relic.deliveries     REPLICA IDENTITY FULL;
